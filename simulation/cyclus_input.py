@@ -95,8 +95,10 @@ def simulation(name="Pakistan", parameters=None):
                 raise RuntimeError(msg)
             PARAMS[key] = PARAMS["global_capacity_factor"]
 
-    PARAMS["reactor_list"].extend(
-        [
+    # Line below does not work, TODO delete
+    #PARAMS["reactor_list"].extend([KhushabReactor(...) for n in range(1, 5)])
+    PARAMS.update(
+        reactor_list=[
             KhushabReactor(
                 name=f"Khushab{n}",
                 power=PARAMS[f"khushab{n}_power"],
@@ -267,7 +269,7 @@ def facilities():
                         "feed_commod_prefs": {"val": enrich_feed_prefs},
                         "product_commod": "WeapongradeU",
                         "tails_commod": "DepletedU",
-                        "tails_assay": PARAMS["depleted_enrichment"],
+                        "tails_assay": PARAMS["DU_enrichment_atom"],
                         "max_feed_inventory": max_feed_inv,
                         "max_enrich": 1.0,
                         "order_prefs": False,
@@ -327,7 +329,7 @@ def facilities():
 def institution():
     """Return the 'institution' part of the Cyclus input file as a dict."""
     deployed_prototypes = [r.name for r in PARAMS["reactor_list"]]
-    build_times = [r.deployment_year for r in PARAMS["reactor_list"]]
+    build_times = [date_to_sim_step(r.deployment_year) for r in PARAMS["reactor_list"]]
 
     # Add waste sink in the last time step (hack to force decay calculations).
     if PARAMS["add_waste_sink_in_last_step"]:
