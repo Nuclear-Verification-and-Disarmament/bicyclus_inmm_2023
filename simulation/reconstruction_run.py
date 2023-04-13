@@ -316,7 +316,9 @@ def main():
     parser.add_argument(
         "--store-sqlite",
         action="store_true",
-        help=("If set, then the Cyclus .sqlite output of each sample is " "stored."),
+        help=(
+            "If set, then the Cyclus .sqlite output of each (accepted) sample is stored."
+        ),
     )
     args = parser.parse_args()
     args.iterations = 0

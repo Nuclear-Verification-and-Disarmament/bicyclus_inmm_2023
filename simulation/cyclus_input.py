@@ -94,9 +94,6 @@ def simulation(name="Pakistan", parameters=None):
                 msg = f"Cannot find key '{key}' in PARAMS"
                 raise RuntimeError(msg)
             PARAMS[key] = PARAMS["global_capacity_factor"]
-
-    # Line below does not work, TODO delete
-    #PARAMS["reactor_list"].extend([KhushabReactor(...) for n in range(1, 5)])
     PARAMS.update(
         reactor_list=[
             KhushabReactor(
@@ -282,8 +279,11 @@ def facilities():
                 "InitialNUStockpile",
                 "MinedU",
                 recipe="NaturalURecipe",
-                throughput=1e299,
-                inventory_size=PARAMS["initial_u_stockpile"],
+                source_kwargs={
+                    "throughput": 1e299,
+                    "inventory_size": PARAMS["initial_u_stockpile"],
+                },
+                facility_kwargs={"lifetime": 2},
             ),
             add_sink("SeparatedPu", recipe=""),
             add_sink("DepletedU"),
@@ -301,6 +301,7 @@ def facilities():
                 "FreshFuel",
                 recipe="NaturalURecipe",
                 max_inv_size=4 * PARAMS["core_mass"],
+                in_commod_prefs={"val": [PARAMS["khushab_fuel_pref"]]},
             ),
             add_sink("WeapongradeU"),
             add_reprocessing(

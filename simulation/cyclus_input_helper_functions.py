@@ -68,55 +68,6 @@ def date_to_sim_step(date):
     return round((date.timestamp() - PARAMS["startdate"].timestamp()) / PARAMS["dt"])
 
 
-def add_sink(commod, name=None, recipe=None):
-    """Generate the Sink configuration dictionary.
-
-    Parameters
-    ----------
-    commod : str or list of str
-
-    name : str, optional
-        If omitted, the facility will be called `commod`Sink.
-
-    recipe : str, optional
-        If None, default mode is used (recipe is called `commod`Recipe).
-        If set to '', then the recipe entry is omitted in the config file.
-    """
-    commod = [commod] if isinstance(commod, str) else commod
-    name = name if name is not None else commod[0] + "Sink"
-    recipe = recipe if recipe is not None else commod[0] + "Recipe"
-    config = {
-        "name": name,
-        "config": {
-            "Sink": {
-                "in_commods": {"val": commod},
-            }
-        },
-    }
-    if recipe:
-        config["config"]["Sink"]["recipe_name"] = recipe
-
-    return config
-
-
-def add_source(name, commod, recipe=None, **source_kwargs):
-    """Return a Source config dictionary.
-
-    Parameters
-    ----------
-    source_kwargs : optional
-        Source state variables. If omitted, Cycamore defaults are used.
-    """
-    recipe = recipe if recipe is not None else commod + "Recipe"
-    config = {
-        "name": name,
-        "config": {"Source": {"outcommod": commod, **source_kwargs}},
-    }
-    if recipe:
-        config["config"]["Source"]["outrecipe"] = recipe
-    return config
-
-
 def add_reprocessing(
     name,
     commod,
@@ -165,6 +116,60 @@ def add_reprocessing(
             }
         },
     }
+    return config
+
+
+def add_sink(commod, name=None, recipe=None):
+    """Generate the Sink configuration dictionary.
+
+    Parameters
+    ----------
+    commod : str or list of str
+
+    name : str, optional
+        If omitted, the facility will be called `commod`Sink.
+
+    recipe : str, optional
+        If None, default mode is used (recipe is called `commod`Recipe).
+        If set to '', then the recipe entry is omitted in the config file.
+    """
+    commod = [commod] if isinstance(commod, str) else commod
+    name = name if name is not None else commod[0] + "Sink"
+    recipe = recipe if recipe is not None else commod[0] + "Recipe"
+    config = {
+        "name": name,
+        "config": {
+            "Sink": {
+                "in_commods": {"val": commod},
+            }
+        },
+    }
+    if recipe:
+        config["config"]["Sink"]["recipe_name"] = recipe
+
+    return config
+
+
+def add_source(name, commod, recipe=None, source_kwargs=None, facility_kwargs=None):
+    """Return a Source config dictionary.
+
+    Parameters
+    ----------
+    source_kwargs : optional
+        Source state variables. If omitted, Cycamore defaults are used.
+    facility_kwargs : optional
+        Facility state variables. If omitted, Cycamore defaults are used.
+    """
+    source_kwargs = {} if source_kwargs is None else source_kwargs
+    facility_kwargs = {} if facility_kwargs is None else facility_kwargs
+    recipe = recipe if recipe is not None else commod + "Recipe"
+    config = {
+        "name": name,
+        "config": {"Source": {"outcommod": commod, **source_kwargs}},
+        **facility_kwargs,
+    }
+    if recipe:
+        config["config"]["Source"]["outrecipe"] = recipe
     return config
 
 
