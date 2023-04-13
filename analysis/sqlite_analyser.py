@@ -3,10 +3,168 @@
 import os
 import re
 import sqlite3
+import sys
+import time
 from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Union
 
+
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
+from mpi4py import MPI
 from bs4 import BeautifulSoup
+
+sns.set_theme(style="darkgrid")
+
+
+@dataclass
+class AnalyseAllFiles:
+    """Class to efficiently analyse a large amount of Cyclus output files."""
+
+    data_path: Union[Path, str]
+    imgs_path: Union[Path, str]
+    job_id: field(default="")
+    max_files: field(default=0)
+
+    def __post_init__(self):
+        """Do things immediately after object initialisation."""
+        self.data_path = Path(self.data_path)
+        self.imgs_path = Path(self.imgs_path)
+
+        self.data_fname = self.imgs_path / "data.h5"
+        self.sqlite_files = self.get_files()
+        self.data = []
+
+    def get_files(self):
+        """Get list of all filenames to be used in the analysis."""
+        sqlite_files = []
+        for dirpath, _, filenames in os.walk(self.data_path):
+            for f in filenames:
+                if f.endswith(".sqlite") and self.job_id in f:
+                    sqlite_files.append(os.path.join(dirpath, f))
+
+        if self.max_files:
+            sqlite_files = sqlite_files[: self.max_files]
+        return sqlite_files
+
+    def get_data(self, force_update=False, store_data=True):
+        """Extract data from sqlite files using MPI.
+
+        Parameters
+        ----------
+        force_update : bool, optional
+            If True, always extract data from sqlite files.
+            If False (default), only do so in case no presaved data file
+            (data.h5) is available.
+
+        store_data : bool, optional
+            Store data as .h5 file.
+        """
+
+        def print_mpi(msg, **kwargs):
+            """Helper function to get consistent MPI output."""
+            print(
+                f"Rank {rank:2}, "
+                f"{time.strftime('%y/%m/%d %H:%M:%S', time.localtime())}   " + msg,
+                **kwargs,
+            )
+
+        if os.path.isfile(self.data_fname) and not force_update:
+            self.data = pd.read_hdf(self.data_fname)
+            print(f"Read in data from {self.data_fname}")
+            return
+
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+
+        if rank == 0:
+            # Maybe not the most elegant solution to distribute tasks but it works
+            # and distributes them evenly.
+            print_mpi(f"Analysing {len(self.sqlite_files)} in total.")
+            n_per_task = len(self.sqlite_files) // size
+            files_per_task = [
+                self.sqlite_files[i * n_per_task : (i + 1) * n_per_task]
+                for i in range(size)
+            ]
+            i = 0
+            while i < len(self.sqlite_files) % size:
+                files_per_task[i % size].append(
+                    self.sqlite_files[size * n_per_task + i]
+                )
+                i += 1
+        else:
+            files_per_task = None
+
+        files_per_task = comm.scatter(files_per_task, root=0)
+        print_mpi(f"Received list of {len(files_per_task)} files.")
+
+        # Keys: name of extracted data, values: lists with data
+        d = defaultdict(list)
+        for i, f in enumerate(files_per_task):
+            if i % 50 == 0:
+                print_mpi(f"{i:3}/{len(files_per_task)}")
+
+            a = SqliteAnalyser(f, verbose=False)
+
+            d["total_heu"].append(a.material_transfers(-1, "WeapongradeUSink")[1])
+            d["total_pu"].append(a.material_transfers(-1, "SeparatedPuSink")[1])
+            d["swu_available"].append(a.swu_available("EnrichmentFacility")[1])
+            d["cap_factor_planned"].append(a.mean_capacity_factor_planned())
+
+        gatherdata = pd.DataFrame(d)
+        gatherdata = comm.gather(gatherdata, root=0)
+        print_mpi("Gathered data")
+
+        if rank != 0:
+            print_mpi("Exiting function")
+            sys.exit()
+        print_mpi("Leaving parallelised section.")
+        print_mpi("=============================\n")
+
+        print_mpi("Concatenating dataframes")
+        data = gatherdata[0]
+        for d in gatherdata[1:]:
+            data = pd.concat([data, d], axis=0, ignore_index=True)
+
+        self.data = data
+
+        if store_data:
+            data.to_hdf(self.data_fname, key="df", mode="w")
+            print_mpi(f"Successfully stored data under {self.data_fname}.\n")
+
+    def plot_1d_histograms(self, **hist_kwargs):
+        """Generate 1D histograms for all quantities stored in the data.
+
+        Parameters
+        ----------
+        hist_kwargs : kwargs
+            Keyword arguments passed to seaborn.histplot.
+        """
+        for qty in self.data.columns:
+            _, ax = plt.subplots(constrained_layout=True)
+            sns.histplot(
+                data=self.data,
+                x=qty,
+                **hist_kwargs,
+                label=f"#entries = {len(self.data[qty])}",
+                ax=ax,
+            )
+            ax.legend()
+            plt.savefig(self.imgs_path / f"histogram_{qty}.png")
+            plt.close()
+
+    def pairplots(self):
+        pairplot_grid = sns.PairGrid(self.data, diag_sharey=False)
+        pairplot_grid.map_upper(sns.histplot)
+        pairplot_grid.map_diag(sns.histplot)
+        pairplot_grid.map_lower(sns.scatterplot)
+        plt.savefig(self.imgs_path / "pairplot.png")
+        plt.close()
 
 
 class SqliteAnalyser:
@@ -27,7 +185,7 @@ class SqliteAnalyser:
 
         self.verbose = verbose
         if self.verbose:
-            print("Opened connection to file {}.".format(self.fname))
+            print(f"Opened connection to file {self.fname}.")
 
         self.connection = sqlite3.connect(self.fname)
         self.cursor = self.connection.cursor()
@@ -38,8 +196,6 @@ class SqliteAnalyser:
         #              (spec, agent_id), (agent_id, spec)
         (self.agents, self.names, self.specs, self.agent_ids) = self.get_agents()
 
-        return
-
     def __del__(self):
         """Destructor closes the connection to the file."""
         try:
@@ -47,7 +203,7 @@ class SqliteAnalyser:
             if self.verbose:
                 print("Closed connection to file {}.".format(self.fname))
         except AttributeError as e:
-            raise RuntimeError("Error while closing file {self.fname}") from e
+            raise RuntimeError(f"Error while closing file {self.fname}") from e
 
     def get_agents(self):
         """Get all agents that took part in the simulation.
@@ -59,7 +215,7 @@ class SqliteAnalyser:
         dict : agent spec (str) -> agent ID (int)
         dict : agent ID (int) -> agent spec (str)
         """
-        data = self.cursor.execute(
+        query = self.cursor.execute(
             "SELECT Spec, AgentId, Prototype FROM AgentEntry"
         ).fetchall()
 
@@ -67,14 +223,14 @@ class SqliteAnalyser:
         names = {}
         specs = defaultdict(list)
         agent_ids = {}
-        for i in range(len(data)):
+        for agent in query:
             # Get the spec (without :agent: or :cycamore: etc. prefix)
-            spec = str(data[i][0])
+            spec = str(agent[0])
             idx = [m.start() for m in re.finditer(":", spec)][-1]
             spec = spec[idx + 1 :]
 
-            agent_id = int(data[i][1])
-            name = str(data[i][2])
+            agent_id = int(agent[1])
+            name = str(agent[2])
 
             agents[agent_id] = name
             names[name] = agent_id
@@ -88,9 +244,9 @@ class SqliteAnalyser:
         if isinstance(agent_id_or_name, str):
             try:
                 return self.names[agent_id_or_name]
-            except KeyError:
+            except KeyError as e:
                 msg = f"Invalid agent name! Valid names are {self.names.keys()}."
-                raise KeyError(msg)
+                raise KeyError(msg) from e
         elif isinstance(agent_id_or_name, int):
             return agent_id_or_name
         else:
@@ -159,8 +315,8 @@ class SqliteAnalyser:
         TODO COMPLETE DOCSTRING
         """
         agent_id = self.agent_id_or_name(agent_id_or_name)
-        enter_time, lifetime = self.cursor.execute(
-            "SELECT EnterTime, Lifetime FROM AgentEntry WHERE AgentId = :agent_id",
+        enter_time = self.cursor.execute(
+            "SELECT EnterTime FROM AgentEntry WHERE AgentId = :agent_id",
             {"agent_id": agent_id},
         ).fetchone()
         data = self.cursor.execute(
