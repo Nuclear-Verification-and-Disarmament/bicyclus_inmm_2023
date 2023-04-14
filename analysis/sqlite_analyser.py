@@ -15,9 +15,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib import rcParams
 from mpi4py import MPI
 from bs4 import BeautifulSoup
 
+rcParams["axes.formatter.limits"] = -5, 4
 sns.set_theme(style="darkgrid")
 
 
@@ -31,7 +33,7 @@ class AnalyseAllFiles:
     max_files: field(default=0)
 
     def __post_init__(self):
-        """Do things immediately after object initialisation."""
+        """Set up more attributes immediately after object initialisation."""
         self.data_path = Path(self.data_path)
         self.imgs_path = Path(self.imgs_path)
 
@@ -74,7 +76,7 @@ class AnalyseAllFiles:
             )
 
         if os.path.isfile(self.data_fname) and not force_update:
-            self.data = pd.read_hdf(self.data_fname)
+            self.data = pd.read_hdf(self.data_fname, key="df")
             print(f"Read in data from {self.data_fname}")
             return
 
@@ -114,7 +116,19 @@ class AnalyseAllFiles:
             d["total_heu"].append(a.material_transfers(-1, "WeapongradeUSink")[1])
             d["total_pu"].append(a.material_transfers(-1, "SeparatedPuSink")[1])
             d["swu_available"].append(a.swu_available("EnrichmentFacility")[1])
-            d["cap_factor_planned"].append(a.mean_capacity_factor_planned())
+            enrichment_feeds = a.enrichment_feeds("EnrichmentFacility")
+            for feed_type, feed_qty in enrichment_feeds.items():
+                d[f"enrichment_feed_{feed_type}"].append(feed_qty)
+
+            d["NU_to_enrichment"].append(
+                a.material_transfers(
+                    "NaturalUStorage", "EnrichmentFacility", sum_=True
+                )[1]
+            )
+
+            reactor_ops = a.all_reactor_operations()["total"]
+            d["capacity_factor_planned"].append(reactor_ops["capacity_factor_planned"])
+            d["capacity_factor_used"].append(reactor_ops["capacity_factor_used"])
 
         gatherdata = pd.DataFrame(d)
         gatherdata = comm.gather(gatherdata, root=0)
@@ -137,7 +151,17 @@ class AnalyseAllFiles:
             data.to_hdf(self.data_fname, key="df", mode="w")
             print_mpi(f"Successfully stored data under {self.data_fname}.\n")
 
-    def plot_1d_histograms(self, **hist_kwargs):
+    def plot_1d_histogram(self, quantity, **hist_kwargs):
+        """Generate seaborn 1D histogram."""
+        n_entries = len(self.data[quantity])
+        _, ax = plt.subplots(constrained_layout=True)
+        sns.histplot(data=self.data, x=quantity, **hist_kwargs, ax=ax)
+        ax.legend(labels=[f"#entries={n_entries}"])
+        ax.set_xlabel(quantity.replace("_", " "))
+        plt.savefig(self.imgs_path / f"histogram_{quantity}.png")
+        plt.close()
+
+    def plot_all_1d_histograms(self, **hist_kwargs):
         """Generate 1D histograms for all quantities stored in the data.
 
         Parameters
@@ -145,25 +169,51 @@ class AnalyseAllFiles:
         hist_kwargs : kwargs
             Keyword arguments passed to seaborn.histplot.
         """
-        for qty in self.data.columns:
-            _, ax = plt.subplots(constrained_layout=True)
-            sns.histplot(
-                data=self.data,
-                x=qty,
-                **hist_kwargs,
-                label=f"#entries = {len(self.data[qty])}",
-                ax=ax,
-            )
-            ax.legend()
-            plt.savefig(self.imgs_path / f"histogram_{qty}.png")
+        for quantity in self.data.columns:
+            self.plot_1d_histogram(quantity, **hist_kwargs)
+
+    def plot_2d_scatterplots(self, x, y, marginals=False, **plot_kwargs):
+        """Generate seaborn 2D histogram."""
+        if marginals:
+            g = sns.JointGrid(data=self.data, x=x, y=y)
+            g.plot_joint(sns.scatterplot)
+            g.plot_marginals(sns.histplot, bins=10, kde=True)
+            g.set_axis_labels(x.replace("_", " "), y.replace("_", " "))
+            g.savefig(self.imgs_path / f"scatter_{x}_{y}.png")
             plt.close()
 
+            return
+
+        n_entries = len(self.data[x])
+        _, ax = plt.subplots(constrained_layout=True)
+        sns.scatterplot(data=self.data, x=x, y=y, **plot_kwargs, ax=ax)
+        ax.legend(labels=[f"#entries={n_entries}"])
+        ax.set_xlabel(x.replace("_", " "))
+        ax.set_ylabel(y.replace("_", " "))
+        plt.savefig(self.imgs_path / f"scatter_{x}_{y}.png")
+        plt.close()
+
     def pairplots(self):
+        """Create a Seaborn pairplot. WARNING: This can be expensive."""
         pairplot_grid = sns.PairGrid(self.data, diag_sharey=False)
         pairplot_grid.map_upper(sns.histplot)
         pairplot_grid.map_diag(sns.histplot)
         pairplot_grid.map_lower(sns.scatterplot)
         plt.savefig(self.imgs_path / "pairplot.png")
+        plt.close()
+
+    def used_vs_planned_capacity_factor(self):
+        """Plot the used vs. the planned overall capacity factor."""
+        min_max = (
+            min(self.data["capacity_factor_planned"]),
+            max(self.data["capacity_factor_used"]),
+        )
+        fig, ax = plt.subplots(constrained_layout=True)
+        sns.scatterplot(
+            data=self.data, x="capacity_factor_planned", y="capacity_factor_used", ax=ax
+        )
+        ax.plot(min_max, min_max, color="C3")
+        plt.savefig(self.imgs_path / "cap_factors.png")
         plt.close()
 
 
@@ -177,6 +227,9 @@ class SqliteAnalyser:
         ----------
         fname : Path
             Path to .sqlite file
+
+        verbose : bool, optional
+            If true, increase verbosity of output.
         """
         self.fname = fname
         if not os.path.isfile(self.fname):
@@ -201,7 +254,7 @@ class SqliteAnalyser:
         try:
             self.connection.close()
             if self.verbose:
-                print("Closed connection to file {}.".format(self.fname))
+                print(f"Closed connection to file {self.fname}.")
         except AttributeError as e:
             raise RuntimeError(f"Error while closing file {self.fname}") from e
 
@@ -301,18 +354,34 @@ class SqliteAnalyser:
 
         return transfer_array
 
+    def enrichment_feeds(self, agent_id_or_name):
+        """Get the amount of each enrichment feed that got used."""
+        agent_id = self.agent_id_or_name(agent_id_or_name)
+        query = self.cursor.execute(
+            "SELECT Value, Units FROM TimeSeriesEnrichmentFeed WHERE AgentId = :agent_id",
+            {"agent_id": agent_id},
+        ).fetchall()
+        feeds = defaultdict(float)
+        for value, feed in query:
+            feeds[feed] += value
+        return feeds
+
     def swu_available(self, agent_id_or_name, sum_=True):
         """Get the SWU available to one enrichment facility.
 
-        TODO COMPLETE DOCSTRING
-
         Parameters
         ----------
+        agent_id_or_name : str or int
+            Agent ID or agent name
 
-        TODO COMPLETE DOCSTRING
+        sum_ : bool, optional
+            If True, only yield the total available SWU (summed over all
+            timesteps).
+
         Returns
         -------
-        TODO COMPLETE DOCSTRING
+        np.array of shape (number of timesteps, 2) if `sum_` is False, else of
+        shape (-2)
         """
         agent_id = self.agent_id_or_name(agent_id_or_name)
         enter_time = self.cursor.execute(
@@ -365,6 +434,10 @@ class SqliteAnalyser:
         ----------
         agent_id_or_name : str or int
             Agent ID or agent name
+
+        Returns
+        -------
+        dict with keys cycle_time, refuelling_time, capacity_factor
         """
         agent_id = self.agent_id_or_name(agent_id_or_name)
         if self.agent_ids[agent_id] != "Reactor":
@@ -376,7 +449,133 @@ class SqliteAnalyser:
             "WHERE AgentId = :agent_id",
             {"agent_id": agent_id},
         ).fetchone()
-        return cycle_time / (cycle_time + refuelling_time)
+        return {
+            "cycle_time": cycle_time,
+            "refuelling_time": refuelling_time,
+            "capacity_factor_planned": cycle_time / (cycle_time + refuelling_time),
+        }
+
+    def reactor_operations(self, agent_id_or_name):
+        """Calculate reactor stats such as the effective capacity factor.
+
+        Parameters
+        ----------
+        agent_id_or_name : str or int
+            Agent ID or agent name
+
+        Returns
+        -------
+        dict with keys:
+            'n_start',
+            'n_end',
+            'cycle_time',
+            'refuelling_time',
+            'capacity_factor_planned',
+            'capacity_factor_used',
+            'in_sim_time',
+            'total_cf_time',
+
+            Note that 'total_cf_time' is the total time considered in the
+            calculation of the capacity factor.
+        """
+        agent_id = self.agent_id_or_name(agent_id_or_name)
+        data = self.capacity_factor_planned(agent_id)
+        enter_time, lifetime = self.cursor.execute(
+            "SELECT EnterTime, Lifetime FROM AgentEntry WHERE AgentId = :agent_id",
+            {"agent_id": agent_id},
+        ).fetchone()
+        in_sim_time = lifetime if lifetime != -1 else self.duration - enter_time
+        data["in_sim_time"] = in_sim_time
+
+        # Keywords used in 'ReactorEvents' table.
+        cycle_start = "CYCLE_START"
+        cycle_end = "CYCLE_END"
+
+        reactor_events = self.cursor.execute(
+            "SELECT Time, Event FROM ReactorEvents WHERE (AgentId = :agent_id)"
+            " AND (Event = :cycle_start or Event = :cycle_end)",
+            {"agent_id": agent_id, "cycle_start": cycle_start, "cycle_end": cycle_end},
+        ).fetchall()
+        data["n_start"] = sum(event == cycle_start for _, event in reactor_events)
+        data["n_end"] = sum(event == cycle_end for _, event in reactor_events)
+
+        # We cannot calculate the capacity factor if there are not at least
+        # three events (i.e., cycle start, cycle end and another cycle start).
+        if len(reactor_events) < 3:
+            msg = "Need at least 3 events to be able to calculate the capacity factor."
+            raise RuntimeError(msg)
+
+        # We only consider complete cycles including refueling period.
+        if reactor_events[-1][1] == cycle_start:
+            online_time = data["n_end"] * data["cycle_time"]
+            total_time = reactor_events[-1][0] - reactor_events[0][0]
+        else:  # Last event = cycle_end
+            time_to_sim_end = self.duration - reactor_events[-1][0]
+            if time_to_sim_end > data["refuelling_time"]:
+                # New cycle could have been started but did not --> This needs to be
+                # taken into account in the capacity factor.
+                online_time = data["n_end"] * data["cycle_time"]
+                total_time = self.duration - reactor_events[0][0]
+            else:
+                # New cycle could not have been started before end of simulation
+                # --> Do not take this cycle into account.
+                online_time = (data["n_end"] - 1) * data["cycle_time"]
+                total_time = reactor_events[-2][0] - reactor_events[0][0]
+
+        data["capacity_factor_used"] = online_time / total_time
+        data["total_cf_time"] = total_time
+
+        print(data)
+
+        return data
+
+    def all_reactor_operations(self, spec="Reactor"):
+        """Get an overview over all reactor operations for all reactors.
+
+        Returns
+        -------
+        dict: (str, int) -> dict: str -> float
+            Keys of the 'outer' dict are 'total' and all reactor agent IDs.
+            The 'inner' dict contains the following keys:
+                'n_start',
+                'n_end',
+                'cycle_time',
+                'refuelling_time',
+                'capacity_factor_planned',
+                'capacity_factor_used',
+                'in_sim_time',
+                'total_cf_time',
+            except for the 'total' dict which contains only a subset of keys:
+                'n_start',
+                'n_end',
+                'in_sim_time',
+                'capacity_factor_planned',
+                'capacity_factor_used',
+        """
+        agent_ids = [id_ for id_, spec_ in self.agent_ids.items() if spec_ == spec]
+
+        all_reactor_ops = {"total": defaultdict(float)}
+        for agent_id in agent_ids:
+            reactor_ops = self.reactor_operations(agent_id)
+            all_reactor_ops[agent_id] = reactor_ops
+            for k in ("n_start", "n_end", "in_sim_time"):
+                all_reactor_ops["total"][k] += reactor_ops[k]
+
+        all_reactor_ops["total"]["capacity_factor_planned"] = (
+            sum(
+                v["in_sim_time"] * v["capacity_factor_planned"]
+                for k, v in all_reactor_ops.items()
+                if k != "total"
+            )
+            / all_reactor_ops["total"]["in_sim_time"]
+        )
+        all_reactor_ops["total"]["capacity_factor_used"] = sum(
+            v["total_cf_time"] * v["capacity_factor_used"]
+            for k, v in all_reactor_ops.items()
+            if k != "total"
+        ) / sum(v["total_cf_time"] for k, v in all_reactor_ops.items() if k != "total")
+
+        return all_reactor_ops
 
     def mean_capacity_factor_planned(self, spec="Reactor"):
         """Get the mean planned capacity factor of all reactors.
@@ -384,6 +583,7 @@ class SqliteAnalyser:
         Note that this is the arithmetic mean *weighted* with each reactor's
         lifetime.
         """
+        # TODO I think this function can be deleted
         agent_ids = [id_ for id_, spec_ in self.agent_ids.items() if spec_ == spec]
         reactor_specs = {}
         for agent_id in agent_ids:

@@ -16,9 +16,16 @@ def main():
         job_id=args.job_id,
         max_files=args.max_files,
     )
-    analyser.get_data()
-    analyser.plot_1d_histograms()
-    analyser.pairplots()
+    analyser.get_data(force_update=args.force_update)
+    # analyser.plot_all_1d_histograms()
+    # analyser.pairplots()
+    analyser.used_vs_planned_capacity_factor()
+
+    analyser.plot_2d_scatterplots("total_pu", "total_heu", marginals=True)
+    analyser.plot_2d_scatterplots(
+        "enrichment_feed_SeparatedU", "capacity_factor_planned"
+    )
+    analyser.plot_2d_scatterplots("enrichment_feed_SeparatedU", "NU_to_enrichment")
 
 
 def parser():
@@ -27,7 +34,6 @@ def parser():
         description="Analyse Cyclus .sqlite output files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
     parser.add_argument(
         "--data-path",
         default=".",
@@ -49,6 +55,14 @@ def parser():
         default="",
         type=str,
         help="If set, only consider files with `job-id` in their filename.",
+    )
+    parser.add_argument(
+        "--force-update",
+        action="store_true",
+        help=(
+            "If set, always extract data from sqlite files. If not set, only "
+            "do so in case no presaved data file (data.h5) is available."
+        ),
     )
     return parser.parse_args()
 
