@@ -1,5 +1,4 @@
 {
   "global_capacity_factor": 0.7,
-  "swu_increase2": 30000,
-  "current_mining_production": 45000
+  "swu_increase2": 30000
 }
