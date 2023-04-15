@@ -20,9 +20,7 @@ RNG_SEED = 12345
 # namedtuple is used to facilitate extracting parameters and calculating the
 # likelihood. This variable might change later depending on which outputs are
 # extracted.
-SimulationOutput = namedtuple(
-    "SimulationOutput", ("cs137_mass", "depleted_u_mass", "parameters")
-)
+SimulationOutput = namedtuple("SimulationOutput", ("cs137_mass", "parameters"))
 
 
 class PakistanCyclusModel(blackbox.CyclusCliModel):
@@ -68,9 +66,6 @@ class PakistanCyclusModel(blackbox.CyclusCliModel):
     def result(self):
         """Extract the relevant output from the last simulation."""
         fname = self.last_sqlite_file
-        depleted_u_mass = cyclus_db.run_with_conn(
-            fname, cyclus_db.extract_mass, {"agent_name": "DepletedUSink"}
-        )
         spent_fuel_composition, spent_fuel_qty = cyclus_db.run_with_conn(
             fname,
             cyclus_db.extract_transaction_composition,
@@ -79,7 +74,6 @@ class PakistanCyclusModel(blackbox.CyclusCliModel):
         cs137_mass = spent_fuel_composition[551370000] * spent_fuel_qty
 
         return SimulationOutput(
-            depleted_u_mass=depleted_u_mass,
             cs137_mass=cs137_mass,
             parameters=self.current_parameters,
         )
