@@ -1,0 +1,12 @@
+{
+  "global_capacity_factor": {
+    "type": "Uniform",
+    "lower": 0.35,
+    "upper": 0.9
+  },
+  "swu_increase2": {
+    "type": "Uniform",
+    "lower": 10000,
+    "upper": 60000
+  }
+}
