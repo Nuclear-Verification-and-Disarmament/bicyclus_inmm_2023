@@ -6,7 +6,7 @@
   },
   "swu_increase2": {
     "type": "Uniform",
-    "lower": 10000,
+    "lower": 15000,
     "upper": 60000
   }
 }
