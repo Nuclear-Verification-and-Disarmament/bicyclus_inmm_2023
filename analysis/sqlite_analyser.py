@@ -116,6 +116,7 @@ class AnalyseAllFiles:
             d["total_heu"].append(a.material_transfers(-1, "WeapongradeUSink")[1])
             d["total_pu"].append(a.material_transfers(-1, "SeparatedPuSink")[1])
             d["swu_available"].append(a.swu_available("EnrichmentFacility")[1])
+            d["swu_used"].append(a.swu_used("EnrichmentFacility")[1])
             enrichment_feeds = a.enrichment_feeds("EnrichmentFacility")
             for feed_type, feed_qty in enrichment_feeds.items():
                 d[f"enrichment_feed_{feed_type}"].append(feed_qty)
@@ -193,9 +194,23 @@ class AnalyseAllFiles:
         plt.savefig(self.imgs_path / f"scatter_{x}_{y}.png")
         plt.close()
 
-    def pairplots(self):
-        """Create a Seaborn pairplot. WARNING: This can be expensive."""
-        pairplot_grid = sns.PairGrid(self.data, diag_sharey=False)
+    def pairplots(self, subset=None, fname=None):
+        """Create a Seaborn pairplot.
+
+        WARNING: This can be computationally expensive and can potentially
+        generate very large plots.
+
+        Parameters
+        ----------
+        subset : None or list of str, optional
+            If None, use all data to generate the pairplot. If not None, this
+            variable must contain a list of columns from self.data. Only these
+            columns will be used to obtain the pairplot.
+        """
+        fname = "pairplot.png" if fname is None else fname
+        data = self.data if subset is None else self.data[subset]
+
+        pairplot_grid = sns.PairGrid(data, diag_sharey=False)
         pairplot_grid.map_upper(sns.histplot)
         pairplot_grid.map_diag(sns.histplot)
         pairplot_grid.map_lower(sns.scatterplot)
@@ -421,6 +436,33 @@ class SqliteAnalyser:
         if sum_:
             return np.array([-1, swu_available[:, 1].sum()])
         return swu_available
+
+    def swu_used(self, agent_id_or_name, sum_=True):
+        """Get the SWU used by one enrichment facility.
+
+        Parameters
+        ----------
+        agent_id_or_name : str or int
+            Agent ID or agent name
+
+        sum_ : bool, optional
+            If True, only yield the total SWU used (summed over all timesteps).
+
+        Returns
+        -------
+        np.array of shape (number of timesteps, 2) if `sum_` is False, else of
+        shape (-2)
+        """
+        agent_id = self.agent_id_or_name(agent_id_or_name)
+        query = self.cursor.execute(
+            "SELECT Time, Value FROM TimeSeriesEnrichmentSWU WHERE AgentId = :agent_id",
+            {"agent_id": agent_id},
+        ).fetchall()
+        rval = np.array(query, dtype=float)
+        if sum_:
+            return np.array([-1, rval[:, 1].sum()])
+
+        return rval
 
     def capacity_factor_planned(self, agent_id_or_name):
         """Get the planned capacity factor of one reactor.

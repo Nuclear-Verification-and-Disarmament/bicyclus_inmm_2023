@@ -26,6 +26,10 @@ def main():
         "enrichment_feed_SeparatedU", "capacity_factor_planned"
     )
     analyser.plot_2d_scatterplots("enrichment_feed_SeparatedU", "NU_to_enrichment")
+    analyser.pairplots(
+        subset=["total_pu", "total_heu", "capacity_factor_used", "swu_used"],
+        fname="correlations.png",
+    )
 
 
 def parser():
