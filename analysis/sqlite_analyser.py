@@ -567,8 +567,6 @@ class SqliteAnalyser:
         data["capacity_factor_used"] = online_time / total_time
         data["total_cf_time"] = total_time
 
-        print(data)
-
         return data
 
     def all_reactor_operations(self, spec="Reactor"):
