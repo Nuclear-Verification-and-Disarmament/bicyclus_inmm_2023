@@ -20,7 +20,7 @@ from mpi4py import MPI
 from bs4 import BeautifulSoup
 
 rcParams["axes.formatter.limits"] = -5, 4
-sns.set_theme(style="darkgrid")
+sns.set_theme(style="darkgrid", context="paper", font="serif", font_scale=1)
 
 
 @dataclass
@@ -36,6 +36,11 @@ class AnalyseAllFiles:
         """Set up more attributes immediately after object initialisation."""
         self.data_path = Path(self.data_path)
         self.imgs_path = Path(self.imgs_path)
+        try:
+            self.imgs_path.mkdir(mode=0o760, parents=True, exist_ok=False)
+            print(f"Creating path {self.imgs_path}")
+        except FileExistsError:
+            print(f"Path {self.imgs_path} already exists.")
 
         self.data_fname = self.imgs_path / "data.h5"
         self.sqlite_files = self.get_files()
@@ -115,6 +120,7 @@ class AnalyseAllFiles:
 
             d["total_heu"].append(a.material_transfers(-1, "WeapongradeUSink")[1])
             d["total_pu"].append(a.material_transfers(-1, "SeparatedPuSink")[1])
+            d["swu_sampled"].append(a.swu_sampled("EnrichmentFacility"))
             d["swu_available"].append(a.swu_available("EnrichmentFacility")[1])
             d["swu_used"].append(a.swu_used("EnrichmentFacility")[1])
             enrichment_feeds = a.enrichment_feeds("EnrichmentFacility")
@@ -122,14 +128,17 @@ class AnalyseAllFiles:
                 d[f"enrichment_feed_{feed_type}"].append(feed_qty)
 
             d["NU_to_enrichment"].append(
-                a.material_transfers(
-                    "NaturalUStorage", "EnrichmentFacility", sum_=True
-                )[1]
+                a.material_transfers("NaturalUStorage", "EnrichmentFacility")[1]
             )
+            d["NU_to_reactors"].append(a.material_transfers("FreshFuelStorage", -1)[1])
 
-            reactor_ops = a.all_reactor_operations()["total"]
+            reactor_ops = a.all_reactor_operations(
+                [f"Khushab{i}" for i in range(1, 5)]
+            )["total"]
             d["capacity_factor_planned"].append(reactor_ops["capacity_factor_planned"])
             d["capacity_factor_used"].append(reactor_ops["capacity_factor_used"])
+            d["dep_U_mass"].append(a.material_transfers(-1, "DepletedUSink")[1])
+            d["cs137_mass"].append(a.cs137_mass("FinalWasteSink"))
 
         gatherdata = pd.DataFrame(d)
         gatherdata = comm.gather(gatherdata, root=0)
@@ -178,7 +187,7 @@ class AnalyseAllFiles:
         if marginals:
             g = sns.JointGrid(data=self.data, x=x, y=y)
             g.plot_joint(sns.scatterplot)
-            g.plot_marginals(sns.histplot, bins=10, kde=True)
+            g.plot_marginals(sns.histplot, kde=True)
             g.set_axis_labels(x.replace("_", " "), y.replace("_", " "))
             g.savefig(self.imgs_path / f"scatter_{x}_{y}.png")
             plt.close()
@@ -211,7 +220,7 @@ class AnalyseAllFiles:
         data = self.data if subset is None else self.data[subset]
 
         pairplot_grid = sns.PairGrid(data, diag_sharey=False)
-        pairplot_grid.map_upper(sns.histplot)
+        pairplot_grid.map_upper(sns.kdeplot)
         pairplot_grid.map_diag(sns.histplot)
         pairplot_grid.map_lower(sns.scatterplot)
         plt.savefig(self.imgs_path / "pairplot.png")
@@ -381,6 +390,36 @@ class SqliteAnalyser:
             feeds[feed] += value
         return feeds
 
+    def swu_sampled(self, agent_id_or_name):
+        """Get the SWU available to one enrichment facility.
+
+        Parameters
+        ----------
+        agent_id_or_name : str or int
+            Agent ID or agent name
+
+        Returns
+        -------
+        Last used separative power in kgSWU / year : float
+        """
+        agent_id = self.agent_id_or_name(agent_id_or_name)
+        timestep = self.cursor.execute(
+            "SELECT DurationSecs FROM TimeStepDur"
+        ).fetchone()[0]
+        data = self.cursor.execute(
+            "SELECT swu_capacity_vals FROM "
+            "AgentState_flexicamore_FlexibleEnrichmentInfo WHERE AgentId = :agent_id",
+            {"agent_id": agent_id},
+        ).fetchone()  # Boost vector with SWUs
+
+        # Convert Boost vectors (in XML) into Python float in units of simulation
+        # timesteps.
+        swu_in_sim_ts = float(
+            BeautifulSoup(data[-1], "xml").find_all("item")[-1].get_text()
+        )
+        # Convert to SWU / years
+        return swu_in_sim_ts / timestep * 86400.0 * 365.0
+
     def swu_available(self, agent_id_or_name, sum_=True):
         """Get the SWU available to one enrichment facility.
 
@@ -402,7 +441,7 @@ class SqliteAnalyser:
         enter_time = self.cursor.execute(
             "SELECT EnterTime FROM AgentEntry WHERE AgentId = :agent_id",
             {"agent_id": agent_id},
-        ).fetchone()
+        ).fetchone()[0]
         data = self.cursor.execute(
             "SELECT swu_capacity_times, swu_capacity_vals FROM "
             "AgentState_flexicamore_FlexibleEnrichmentInfo WHERE AgentId = :agent_id",
@@ -422,6 +461,10 @@ class SqliteAnalyser:
         complete_list = []
         previous_time = swu_times[0]
         previous_val = swu_vals[0]
+        # Ensure to take last SWU increase into account.
+        if swu_times[-1] + enter_time < self.duration:
+            swu_times.append(self.duration - enter_time)
+            swu_vals.append(swu_vals[-1])
         for time, val in zip(swu_times, swu_vals):
             for t in range(int(previous_time), int(time)):
                 complete_list += [[t, previous_val]]
@@ -463,6 +506,27 @@ class SqliteAnalyser:
             return np.array([-1, rval[:, 1].sum()])
 
         return rval
+
+    def cs137_mass(self, agent_id_or_name):
+        agent_id = self.agent_id_or_name(agent_id_or_name)
+
+        resource_id = self.cursor.execute(
+            "SELECT ResourceId FROM Transactions WHERE ReceiverId = :receiver_id",
+            {"receiver_id": agent_id},
+        ).fetchone()
+        composition_id, spent_fuel_qty = self.cursor.execute(
+            "SELECT QualId, Quantity FROM Resources WHERE ResourceId = :resource_id",
+            {"resource_id": resource_id[0]},
+        ).fetchone()
+        mass_fractions = dict(
+            self.cursor.execute(
+                "SELECT NucId, MassFrac FROM Compositions WHERE QualId = :composition_id",
+                {"composition_id": composition_id},
+            ).fetchall()
+        )
+        cs137_mass_frac = mass_fractions[551370000] / sum(mass_fractions.values())
+
+        return spent_fuel_qty * cs137_mass_frac
 
     def capacity_factor_planned(self, agent_id_or_name):
         """Get the planned capacity factor of one reactor.
@@ -569,8 +633,13 @@ class SqliteAnalyser:
 
         return data
 
-    def all_reactor_operations(self, spec="Reactor"):
+    def all_reactor_operations(self, agent_ids_or_names):
         """Get an overview over all reactor operations for all reactors.
+
+        Parameters
+        ----------
+        agent_ids_or_name : iterable of int or str
+            Values must be valid agent IDs or agent names.
 
         Returns
         -------
@@ -592,10 +661,8 @@ class SqliteAnalyser:
                 'capacity_factor_planned',
                 'capacity_factor_used',
         """
-        agent_ids = [id_ for id_, spec_ in self.agent_ids.items() if spec_ == spec]
-
         all_reactor_ops = {"total": defaultdict(float)}
-        for agent_id in agent_ids:
+        for agent_id in map(self.agent_id_or_name, agent_ids_or_names):
             reactor_ops = self.reactor_operations(agent_id)
             all_reactor_ops[agent_id] = reactor_ops
             for k in ("n_start", "n_end", "in_sim_time"):
